@@ -22,10 +22,13 @@ class BatchedAllegroEnv:
 
         # Initialize model
         self.model_ = mujoco.MjModel.from_xml_path(self.param_.model_path_)
-        self.mjx_model = mjx.put_model(self.model_)
+        # In __init__ method:
+        self.mjx_model_ = mjx.put_model(self.model_)
         # Generate model batches
-        self.mjx_model_batch = jax.tree.map(
-        lambda x: x[None].repeat(self.batch_size, axis=0), self.mjx_model)
+        self.mjx_model_batch = jax.tree_map(
+            lambda x: jnp.tile(x[None], (self.batch_size,) + (1,) * (x.ndim)),
+            self.mjx_model_
+        )
         # Create a batch of environment
         self.mjx_data_batch = jax.vmap(mjx.make_data)(self.mjx_model_batch)
 
@@ -71,7 +74,7 @@ class BatchedAllegroEnv:
             self.break_out_signal_ = True
 
 
-    @partial(jax.jit, static_argnums=(0,))
+
     def reset_env(self):
         init_qpos = jnp.tile(
             jnp.concatenate([self.param_.init_robot_qpos_, self.param_.init_obj_qpos_]),
@@ -86,42 +89,48 @@ class BatchedAllegroEnv:
 
         return self.mjx_data_batch
     
-    @partial(jax.jit, static_argnums=(0,))
+
     def get_jpos(self):
         return self.mjx_data_batch.qpos[:, :self.n_robot_qpos_]
         
-    @partial(jax.jit, static_argnums=(0,))
+
     def get_state(self):
         obj_pos = self.mjx_data_batch.qpos[:, -7:]
         robot_pos = self.mjx_data_batch.qpos[:, :16]
         return jnp.concatenate([obj_pos, robot_pos], axis=1)
 
     
-    @partial(jax.jit, static_argnums=(0,))
+
     def set_goal(self, goal_pos=None, goal_quat=None):
         if goal_pos is not None:
-            self.goal_pos = goal_pos
+            # Ensure goal_pos is 2D: (batch_size, 3)
+            self.goal_pos = jnp.atleast_2d(goal_pos)
+            if self.goal_pos.shape[0] == 1:
+                self.goal_pos = jnp.tile(self.goal_pos, (self.batch_size, 1))
         if goal_quat is not None:
-            self.goal_quat = goal_quat
+            # Ensure goal_quat is 2D: (batch_size, 4)
+            self.goal_quat = jnp.atleast_2d(goal_quat)
+            if self.goal_quat.shape[0] == 1:
+                self.goal_quat = jnp.tile(self.goal_quat, (self.batch_size, 1))
         
         # Update goal position in the MJX model
         def update_goal_pos(model, pos):
-            body_id = mjx.mj_name2id(model, mjx.mjtObj.mjOBJ_BODY, b'goal')
+            body_id = mjx.name2id(model, 1, b'goal')  # 1 is the constant for mjOBJ_BODY in MJX
             return model.replace(body_pos=model.body_pos.at[body_id].set(pos))
-        
-        self.mjx_model_ = jax.vmap(update_goal_pos)(self.mjx_model_, self.goal_pos)
         
         # Update goal orientation in the MJX model
         def update_goal_quat(model, quat):
-            body_id = mjx.mj_name2id(model, mjx.mjtObj.mjOBJ_BODY, b'goal')
+            body_id = mjx.name2id(model, 1, b'goal')  # 1 is the constant for mjOBJ_BODY in MJX
             return model.replace(body_quat=model.body_quat.at[body_id].set(quat))
         
-        self.mjx_model_ = jax.vmap(update_goal_quat)(self.mjx_model_, self.goal_quat)
+        # Apply updates to all models in the batch
+        self.mjx_model_batch = jax.vmap(update_goal_pos)(self.mjx_model_batch, self.goal_pos)
+        self.mjx_model_batch = jax.vmap(update_goal_quat)(self.mjx_model_batch, self.goal_quat)
         
         # Forward the simulation to apply changes
-        self.mjx_data_batch = jax.vmap(mjx.forward)(self.mjx_model_, self.mjx_data_batch)
+        self.mjx_data_batch = jax.vmap(mjx.forward)(self.mjx_model_batch, self.mjx_data_batch)
 
-    @partial(jax.jit, static_argnums=(0,))
+
     def step(self, jpos_cmd_batch):
         # Get current joint positions for all batch elements
         curr_jpos_batch = self.get_jpos_batch()
@@ -147,7 +156,7 @@ class BatchedAllegroEnv:
 
         return self.mjx_data_batch
 
-    @partial(jax.jit, static_argnums=(0,))
+
     def compute_path_cost(self, x, u):
         obj_pose, robot_qpos = x[:, :7], x[:, 7:]
         ff_qpos, mf_qpos, rf_qpos, tm_qpos = robot_qpos[:, :4], robot_qpos[:, 4:8], robot_qpos[:, 8:12], robot_qpos[:, 12:]
@@ -171,7 +180,7 @@ class BatchedAllegroEnv:
         
         return contact_cost + 0.1 * control_cost
 
-    @partial(jax.jit, static_argnums=(0,))
+
     def compute_final_cost(self, x):
         obj_pose = x[:, :7]
         
