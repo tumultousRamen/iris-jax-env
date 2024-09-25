@@ -1,7 +1,9 @@
 <mujoco model="allegro_right">
   <compiler angle="radian" autolimits="true"/>
 
-  <option cone="elliptic" impratio="10"/>
+  <option cone="pyramidal" impratio="100" iterations="1" ls_iterations="5">
+    <flag eulerdamp="disable"/>
+  </option>
 
   <default>
     <default class="allegro_right">
